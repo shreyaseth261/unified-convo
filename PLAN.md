@@ -56,6 +56,18 @@ Outbound sends go through four workers and a buffered job channel. Attempt count
 
 Status order lives in `internal/status`. The store does not invent a second set of rules.
 
+## 10,000 inbound messages per second
+
+What is running now is one process and one SQLite file. That is a good fit for building the service and running the tests. At 10,000 inbound messages a second I would stop asking the request handler to do the database work.
+
+The handler would check the payload, append it to a log such as Kafka, and return. The log would be split by `locationId`, so all messages for one store stay in order. If Twilio retries the same webhook, the consumer still ignores it because `providerMessageId` is unique.
+
+Workers would read that log and write Postgres, using the same tables we have now. The new message and the unread increment would still happen in one transaction, so a burst cannot lose counts. If one location is much busier than the others, that partition can be split again by contact. Search would move to Postgres full text, because a `LIKE '%offer%'` scan will not keep up.
+
+Sending replies would be a separate pool of workers. Each one claims a queued row with `SELECT … FOR UPDATE SKIP LOCKED` before calling the provider, so two servers never send the same message. The attempt count stays on the row, the way it does today.
+
+The live updates need a shared bus, Redis or NATS. When a message is saved, the worker publishes `message.created` or `message.status`. Every API server is subscribed. A server only forwards an event to the agents who are connected to it. Someone on server A and someone on server B both see the same thread, and it does not matter which server they opened.
+
 ## Code structure
 
 ```
